@@ -1,0 +1,54 @@
+<!DOCTYPE html>
+<html lang="en">
+	<head>
+		<meta charset="utf-8" />
+		<meta
+			name="viewport"
+			content="initial-scale=1, maximum-scale=5, width=device-width, height=device-height"
+		/>
+		<title>JSpek</title>
+
+		<link rel="manifest" href="jspek.webmanifest" crossorigin="use-credentials" />
+
+		<meta name="description" content="JSpek" />
+		<meta name="theme-color" content="#000000" />
+
+		<meta name="mobile-web-app-capable" content="yes" />
+		<meta name="apple-mobile-web-app-capable" content="yes" />
+		<meta name="apple-mobile-web-app-title" content="JSpek" />
+		<meta name="apple-mobile-web-app-status-bar-style" content="black" />
+
+		<link rel="icon" href="assets/favicon.ico" />
+		<link rel="shortcut icon" type="image/png" href="assets/icon.png" />
+		<link
+			rel="apple-touch-icon"
+			sizes="192x192"
+			href="assets/apple-touch-icon.png"
+		/>
+
+		<link rel="stylesheet" href="css/jspek.package.min.css" />
+		<script src="js/jspek.package.release.min.js"></script>
+	</head>
+	<body>
+		<div id="heads">
+			<a
+				id="jspek"
+				href="https://github.com/nicopowa/jspek"
+				target="_blank"
+			>
+				JSpek
+			</a>
+			<div id="ctrls">
+				<button id="browse">Browse</button>
+				<button id="save">Export</button>
+				<input
+					type="file"
+					id="f"
+					accept=".flac,.wav,.mp3,.m4a,.ogg"
+					multiple
+				/>
+			</div>
+		</div>
+		<div id="app"></div>
+	</body>
+</html>
