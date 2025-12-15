@@ -10,16 +10,16 @@
 			"type": "image/png"
 		},
 		{
+			"purpose": "any",
 			"src": "assets/icon.png",
 			"sizes": "512x512",
-			"type": "image/png",
-			"purpose": "any"
+			"type": "image/png"
 		},
 		{
+			"purpose": "maskable",
 			"src": "assets/iconmask.png",
 			"sizes": "192x192",
-			"type": "image/png",
-			"purpose": "maskable"
+			"type": "image/png"
 		}
 	],
 	"start_url": "/jspek",

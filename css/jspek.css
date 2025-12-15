@@ -1,9 +1,10 @@
 :root {
-	--bg: #000000;
-	--fade: #757575;
+	--back: #000000;
+	--fade: #939393;
 	--text: #e0e0e0;
+	--hint: #3b89f6;
 	--bord: solid 1px var(--fade);
-	--font: 'Courier New', Courier, monospace;
+	--font: "Courier New", Courier, monospace;
 }
 html,
 body {
@@ -15,14 +16,18 @@ html {
 	height: 100%;
 }
 body {
-	background: var(--bg);
+	background: var(--back);
 	color: var(--text);
 	font-family: var(--font);
+	height: 100%;
 	min-height: 100%;
 	display: flex;
 	flex-direction: column;
 	overflow: hidden;
-	font-size: 1rem;
+	touch-action: manipulation;
+	-webkit-touch-callout: none;
+	-webkit-user-select: none;
+	user-select: none;
 }
 div {
 	box-sizing: border-box;
@@ -38,43 +43,104 @@ button {
 	border: none;
 	padding: 0 8px;
 	cursor: pointer;
-	font-size: inherit;
+	font-size: .8rem;
 	font-family: inherit;
 	outline: none;
+	-webkit-touch-callout: none;
+	-webkit-user-select: none;
+	user-select: none;
 }
 input {
 	display: none;
 }
-#heads {
-	height: 34px;
+#heads,
+#foots {
+	height: 32px;
 	display: flex;
 	align-items: center;
 	justify-content: space-between;
 	flex-shrink: 0;
-	border-bottom: var(--bord);
 	-webkit-user-select: none;
 	user-select: none;
 }
+#heads {
+	border-bottom: var(--bord);
+	gap: 0.5rem;
+}
+#foots {
+	border-top: var(--bord);
+}
 #jspek {
 	padding-left: 6px;
+	font-size: 1.4rem;
+	pointer-events: none;
 }
-#ctrls button {
-	height: 100%;
-	border-left: var(--bord);
+#git {
+	width: 1.3rem;
+	height: 1.3rem;
+	background: center / contain no-repeat
+		url("data:image/svg+xml,%3Csvg%20width%3D%2298%22%20height%3D%2298%22%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%3E%3Cpath%20fill-rule%3D%22evenodd%22%20clip-rule%3D%22evenodd%22%20d%3D%22M48.854%200C21.839%200%200%2022%200%2049.217c0%2021.756%2013.993%2040.172%2033.405%2046.69%202.427.49%203.316-1.059%203.316-2.362%200-1.141-.08-5.052-.08-9.127-13.59%202.934-16.42-5.867-16.42-5.867-2.184-5.704-5.42-7.17-5.42-7.17-4.448-3.015.324-3.015.324-3.015%204.934.326%207.523%205.052%207.523%205.052%204.367%207.496%2011.404%205.378%2014.235%204.074.404-3.178%201.699-5.378%203.074-6.6-10.839-1.141-22.243-5.378-22.243-24.283%200-5.378%201.94-9.778%205.014-13.2-.485-1.222-2.184-6.275.486-13.038%200%200%204.125-1.304%2013.426%205.052a47%2047%200%200%201%2012.214-1.63c4.125%200%208.33.571%2012.213%201.63%209.302-6.356%2013.427-5.052%2013.427-5.052%202.67%206.763.97%2011.816.485%2013.038%203.155%203.422%205.015%207.822%205.015%2013.2%200%2018.905-11.404%2023.06-22.324%2024.283%201.78%201.548%203.316%204.481%203.316%209.126%200%206.6-.08%2011.897-.08%2013.526%200%201.304.89%202.853%203.316%202.364%2019.412-6.52%2033.405-24.935%2033.405-46.691C97.707%2022%2075.788%200%2048.854%200%22%20fill%3D%22%2324292f%22%2F%3E%3C%2Fsvg%3E");
 }
-#jspek, #ctrls {
+
+#spc {
+	flex-grow: 1;
+}
+#jspek,
+#ctrls,
+#tools {
 	height: 100%;
 	display: flex;
 	align-items: center;
 }
+#ctrls button,
+#clear {
+	height: 100%;
+	border-left: var(--bord);
+}
+#tools {
+	flex-shrink: 0;
+}
+#tools button {
+	height: 100%;
+	border-right: var(--bord);
+}
+/* All & Low always enabled */
+#tools.nope button:not(:nth-child(-n + 3)) {
+	opacity: 0.5;
+	pointer-events: none;
+}
+#sync.actv {
+	color: var(--hint);
+}
+#low.actv {
+	color: var(--hint);
+}
+#clear {
+	color: #873333;;
+}
 #app {
 	flex: 1;
-	position: relative;
-	overflow: hidden;
+}
+#wrp {
+	min-height: 100%;
 	display: grid;
 }
-#app:empty::after {
-	content: " Browse or drop files \A \A Click twice to clear";
+@media (max-width: 540px) and (orientation: portrait) {
+	#app {
+		overflow-y: scroll;
+	}
+	#wrp {
+		grid-template-columns: 1fr !important;
+		grid-template-rows: none !important;
+		grid-auto-rows: 240px !important;
+	}
+	.spek {
+		height: 240px !important;
+		min-height: 240px !important;
+	}
+}
+#wrp:empty::after {
+	content: "Browse or drop files";
 	white-space: pre;
 	text-align: center;
 	position: absolute;
@@ -82,11 +148,23 @@ input {
 	top: 50%;
 	transform: translate(-50%, -50%);
 	color: var(--fade);
+	font-size: 1.3rem;
 }
 .spek {
 	position: relative;
-	min-width: 0;
-	min-height: 0;
+	border-width: 1px;
+	border-style: solid;
+	border-color: transparent;
+}
+.spek.fcs::after {
+	content: "";
+	position: absolute;
+	left: 6px;
+	top: 5px;
+	width: 9px;
+	height: 9px;
+	border-radius: 50%;
+	background: var(--hint);
 }
 .spek canvas {
 	position: absolute;

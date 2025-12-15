@@ -1,7 +1,7 @@
 # JSpek
 
 Vanilla JavaScript [Spek](https://www.spek.cc/)  
-Work in progress  
+⚠️ Tesing only, work in progress  
 
 [DEMO](https://nicopowa.github.io/jspek)  
 
@@ -10,19 +10,15 @@ Work in progress
 ## Features
 
 - Client side only
-- Multiple instances
+- No data sent to server
 - Browse or drop files
+- Multiple instances
+- Spectrum zoom & pan
+- Sync zoom & pan
 - Export view to PNG
-- Double-click to remove
 - Installable web app
+- Lightweight 13KB JS + 4KB CSS  
 
-6.5KB JS + 1.2KB CSS  
+## Formats
 
-## TODO
-
-[ ] Autoscale text infos & units
-[ ] Mobile vertical layout scroll
-[ ] Audio playback ?
-	[ ] Vertical line current time
-[ ] Audio compare ?
-[ ] Offline service worker
+JSpek relies on [WebAudio](https://developer.mozilla.org/en-US/docs/Web/API/BaseAudioContext/decodeAudioData) to decode files. 

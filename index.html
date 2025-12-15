@@ -31,24 +31,31 @@
 	</head>
 	<body>
 		<div id="heads">
-			<a
-				id="jspek"
-				href="https://github.com/nicopowa/jspek"
-				target="_blank"
-			>
-				JSpek
+			<div id="jspek">JSpek</div>
+			<a href="https://github.com/nicopowa/jspek" target="_blank">
+				<div id="git"></div>
 			</a>
+			<div id="spc"></div>
 			<div id="ctrls">
 				<button id="browse">Browse</button>
-				<button id="save">Export</button>
-				<input
-					type="file"
-					id="f"
-					accept=".flac,.wav,.mp3,.m4a,.ogg"
-					multiple
-				/>
+				<button id="export">Export</button>
+				<input id="files" type="file" accept=".flac,.wav,.mp3,.m4a,.ogg,.aiff,.aac,.alac,.ape,.opus" multiple/>
 			</div>
 		</div>
-		<div id="app"></div>
+		<div id="app">
+			<div id="wrp"></div>
+		</div>
+		<div id="foots">
+			<div id="tools" class="nope">
+				<button id="select">All</button>
+				<button id="low">Low</button>
+				<button id="sync">Sync</button>
+				<button id="reset">Full</button>
+				<button id="zoomin">In</button>
+				<button id="zoomout">Out</button>
+				<button id="remove">Del</button>
+			</div>
+			<button id="clear">Clear</button>
+		</div>
 	</body>
 </html>

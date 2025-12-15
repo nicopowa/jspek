@@ -1,585 +1,672 @@
-const FFT_CACHE = {};
+const byId = i =>
+	/** @type {!HTMLElement} */(document.querySelector("#" + i));
 
-class FFT {
+let WRK = null, UID = 0;
 
-	static ctx(n) {
+/**
+ * @param {string} typ
+ * @param {WJSpek} dat
+ * @param {(ArrayBuffer|OffscreenCanvas)=} trs
+ */
+const send = (typ, dat = {}, trs) =>
+	WRK.postMessage(
+		{
+			type: typ,
+			...dat
+		},
+		[...(!!trs ? [trs] : [])]
+	);
 
-		if(FFT_CACHE[n])
-			return FFT_CACHE[n];
+const Parsers = {
+	// Read 4 bytes as string
+	get4cc: (v, i) =>
+		String.fromCharCode(
+			v.getUint8(i),
+			v.getUint8(i + 1),
+			v.getUint8(i + 2),
+			v.getUint8(i + 3)
+		),
 
-		const bit = new Uint32Array(n);
-		const cos = new Float32Array(n / 2);
-		const sin = new Float32Array(n / 2);
+	// FLAC (Fixed offsets)
+	flac: v =>
+		({
+			cdc: "FLAC",
+			spr: (v.getUint8(18) << 12) | (v.getUint8(19) << 4) | (v.getUint8(20) >> 4),
+			chn: ((v.getUint8(20) >> 1) & 7) + 1,
+			btd: ((v.getUint8(20) & 1) << 4 | v.getUint8(21) >> 4) + 1
+		}),
 
-		// Bit-Reversal
-		for(let lim = 1, b = n >> 1; lim < n; lim <<= 1, b >>= 1)
-			for(let i = 0; i < lim; i++)
-				bit[i + lim] = bit[i] + b;
+	// WAV (Chunk walker)
+	wav: v => {
 
-		// Precompute Tables
-		const k = -2 * Math.PI / n;
+		let p = 12, meta = {
+			cdc: "WAV",
+			pcm: true
+		};
 
-		for(let i = 0; i < n / 2; i++) {
+		while(p < v.byteLength - 8) {
 
-			cos[i] = Math.cos(k * i);
-			sin[i] = Math.sin(k * i);
+			const cid = v.getUint32(p), csz = v.getUint32(
+				p + 4,
+				true
+			);
+
+			if(cid === 0x666d7420) { // 'fmt '
+
+				const tag = v.getUint16(
+					p + 8,
+					true
+				);
+
+				meta.cdc = tag === 3 ? "WAV (Float)" : "WAV (PCM)";
+				meta.chn = v.getUint16(
+					p + 10,
+					true
+				);
+				meta.spr = v.getUint32(
+					p + 12,
+					true
+				);
+				meta.btd = v.getUint16(
+					p + 22,
+					true
+				);
+				break;
+			
+			}
+
+			p += 8 + csz;
 		
 		}
 
-		return FFT_CACHE[n] = {
-			n, bit, cos, sin
+		return meta;
+	
+	},
+
+	// AIFF (Chunk walker)
+	aiff: v => {
+
+		let p = 12, meta = {
+			cdc: "AIFF",
+			pcm: true
+		};
+
+		while(p < v.byteLength - 8) {
+
+			const cid = v.getUint32(p), csz = v.getUint32(p + 4);
+
+			if(cid === 0x434F4D4D) { // 'COMM'
+
+				meta.chn = v.getInt16(p + 8);
+				meta.btd = v.getInt16(p + 14);
+				const exp = v.getUint16(p + 16) & 0x7FFF;
+				const mant = v.getUint32(p + 18);
+
+				if(exp > 0)
+					meta.spr = mant * Math.pow(
+						2,
+						exp - 16383 - 31
+					);
+
+				break;
+			
+			}
+
+			p += 8 + ((csz + 1) & ~1);
+		
+		}
+
+		return meta;
+	
+	},
+
+	// MP3 (ID3 Skipper & Frame Header)
+	mp3: v => {
+
+		let offset = 0;
+
+		// Skip ID3v2 if present
+		if((v.getUint32(0) >>> 8) === 0x494433) {
+
+			const size = (v.getUint8(6) << 21) | (v.getUint8(7) << 14) | (v.getUint8(8) << 7) | v.getUint8(9);
+
+			offset = 10 + size;
+		
+		}
+		
+		// Find Sync
+		if(offset < v.byteLength - 4) {
+
+			const head = v.getUint32(offset);
+
+			if(((head >>> 21) & 0x7FF) === 0x7FF) {
+
+				const ver = (head >>> 19) & 3, srIdx = (head >>> 10) & 3;
+				const rates = {
+					3: [44100, 48000, 32000],
+					2: [22050, 24000, 16000],
+					0: [11025, 12000, 8000]
+				};
+
+				return {
+					cdc: "MP3",
+					spr: rates[ver]?.[srIdx] || 44100
+				};
+			
+			}
+		
+		}
+
+		return {
+			cdc: "MP3"
 		};
 	
-	}
+	},
 
-	static calc({
-		n, bit, cos, sin
-	}, r, im) {
+	// OGG (Page parsing)
+	ogg: v => {
 
-		// Bit-Reverse Permutation
-		for(let i = 0; i < n; i++) {
+		const nsegs = v.getUint8(26), head = 27 + nsegs;
+		const sig = v.getUint32(head + 1);
 
-			const j = bit[i];
+		if(v.getUint8(head) === 0x01 && sig === 0x766F7262) {
 
-			if(j > i) {
+			return {
+				cdc: "Vorbis",
+				chn: v.getUint8(head + 11),
+				spr: v.getUint32(
+					head + 12,
+					true
+				)
+			};
+		
+		}
+		else if(v.getUint32(head) === 0x4F707573) {
 
-				const tr = r[i];
-
-				r[i] = r[j];
-				r[j] = tr;
-				const ti = im[i];
-
-				im[i] = im[j];
-				im[j] = ti;
-			
-			}
+			return {
+				cdc: "Opus",
+				chn: v.getUint8(head + 9),
+				spr: v.getUint32(
+					head + 12,
+					true
+				)
+			};
 		
 		}
 
-		// Cooley-Tukey Butterfly
-		for(let size = 2; size <= n; size *= 2) {
-
-			const half = size / 2;
-			const step = n / size;
-
-			for(let i = 0; i < n; i += size) {
-
-				for(let j = 0; j < half; j++) {
-
-					const idx = i + j;
-					const idx2 = idx + half;
-					const k = j * step;
-					
-					const c = cos[k];
-					const s = sin[k];
-					
-					const tr = r[idx2] * c - im[idx2] * s;
-					const ti = r[idx2] * s + im[idx2] * c;
-
-					r[idx2] = r[idx] - tr;
-					im[idx2] = im[idx] - ti;
-					r[idx] += tr;
-					im[idx] += ti;
-				
-				}
-			
-			}
-		
-		}
+		return {
+			cdc: "OGG"
+		};
 	
-	}
+	},
 
-}
+	// MP4/AAC (Atom Walker)
+	mp4: v => {
 
-const PAL = new Uint32Array(256);
+		let meta = {
+			cdc: "AAC",
+			pcm: false
+		};
+		const find = (p, end, cb) => {
 
-for(let i = 0; i < 256; i++) {
+			while(p < end - 8) {
 
-	const x = i / 255;
-	const r = x < .13 ? 0 : x < .73 ? Math.sin((x - .13) / .6 * Math.PI / 2) : 1;
-	const g = x < .6 ? 0 : x < .91 ? Math.sin((x - .6) / .31 * Math.PI / 2) : 1;
-	const b = x < .6 ? .5 * Math.sin(x / .6 * Math.PI) : x < .78 ? 0 : (x - .78) / .22;
+				const sz = v.getUint32(p);
 
-	PAL[i] = 0xff000000 | (b * 255 << 16) | (g * 255 << 8) | (r * 255);
+				if(sz < 8 || p + sz > end)
+					break;
 
-}
+				if(cb(
+					Parsers.get4cc(
+						v,
+						p + 4
+					),
+					p,
+					sz
+				))
+					return true;
+
+				p += sz;
+			
+			}
+		
+		};
+		const walk = (start, max) => {
+
+			find(
+				start,
+				max,
+				(nm, p, sz) => {
+
+					if(["moov", "trak", "mdia", "minf", "stbl", "stsd"].includes(nm))
+						return walk(
+							p + (nm === "stsd" ? 16 : 8),
+							p + sz
+						);
+
+					if(nm === "alac") {
+
+						meta.cdc = "ALAC";
+						meta.pcm = true;
+						meta.chn = v.getUint16(p + 24);
+						meta.btd = v.getUint16(p + 26);
+						meta.spr = v.getUint32(p + 32) >>> 16;
+						// ALAC Cookie
+						const head = v.getUint16(p + 16) === 1 ? 52 : 36;
+
+						find(
+							p + head,
+							p + sz,
+							(snm, sp) => {
+
+								if(snm === "alac") {
+
+									meta.btd = v.getUint8(sp + 17);
+									meta.chn = v.getUint8(sp + 21);
+									meta.spr = v.getUint32(sp + 32);
+
+									return true;
+						
+								}
+					
+							}
+						);
+
+						return true;
+				
+					}
+
+					if(nm === "mp4a") {
+
+						meta.chn = v.getUint16(p + 24);
+						meta.spr = v.getUint32(p + 32) >>> 16;
+
+						return true;
+				
+					}
+			
+				}
+			);
+		
+		};
+
+		walk(
+			0,
+			v.byteLength
+		);
+
+		return meta;
+	
+	},
+	
+	ape: v =>
+		({
+			cdc: "APE"
+		})
+};
 
 class JSpek {
 
-	constructor(fil, app) {
+	constructor(f, main) {
 
+		this.main = main;
+		this.uid = ++UID;
 		this.dpr = window.devicePixelRatio || 1;
-		this.siz = 2048; // default size
-		this.min = -120;
-		this.max = 0;
-		this.tck = 4 * this.dpr;
-		this.buf = null;
-		this.raf = null;
+		this.buf = false;
 		this.dat = {
-			nnm: "",
-			inf: ""
+			nnm: f.name,
+			inf: "Loading"
 		};
-		this.lay = {};
-
-		this.win = null;
+		this.lay = {
+			x: 0,
+			y: 0,
+			w: 0,
+			h: 0,
+			fw: 0,
+			fh: 0
+		};
+		this.zoom = 1;
+		this.pan = 0;
+		this.ori = 0;
+		this.drg = false;
+		this.did = false;
+		this.frm = null;
 
 		this.elt = document.createElement("div");
-		this.elt.classList.add("spek");
+		this.elt.className = "spek";
 		this.cvs = document.createElement("canvas");
 		this.elt.append(this.cvs);
-		this.ctx = /** @type {CanvasRenderingContext2D} */(this.cvs.getContext(
-			"2d",
-			{
-				alpha: false
-			}
-		));
-		app.append(this.elt);
+		main.wrp.append(this.elt);
 
-		this.load(fil);
+		const off = this.cvs.transferControlToOffscreen();
+
+		send(
+			"init",
+			{
+				uid: this.uid,
+				cvs: off
+			},
+			off
+		);
+
+		this.bindEvents();
+		this.load(f);
+	
+	}
+
+	bindEvents() {
+
+		const onDown = e => {
+
+			if(!this.buf || this.zoom === 1)
+				return;
+
+			this.drg = true;
+			this.did = false;
+			this.cvs.setPointerCapture(e.pointerId);
+			const rect = this.cvs.getBoundingClientRect();
+
+			this.ori = this.pan + (((e.clientX - rect.left) * this.dpr - this.lay.x) / this.lay.w) * (1 / this.zoom);
+		
+		};
+
+		const onMove = e => {
+
+			if(!this.drg)
+				return;
+
+			this.did = true;
+			const rect = this.cvs.getBoundingClientRect();
+			const viewSize = 1 / this.zoom;
+			const pointerNorm = ((e.clientX - rect.left) * this.dpr - this.lay.x) / this.lay.w;
+
+			this.pan = Math.max(
+				0,
+				Math.min(
+					1 - viewSize,
+					this.ori - pointerNorm * viewSize
+				)
+			);
+			this.render(true);
+			this.main.pan(
+				this,
+				true
+			);
+		
+		};
+
+		const onUp = e => {
+
+			if(this.drg) {
+
+				this.drg = false;
+				this.cvs.releasePointerCapture(e.pointerId);
+				this.render();
+				this.main.pan(
+					this,
+					false
+				);
+			
+			}
+		
+		};
+
+		this.cvs.onpointerdown = onDown;
+		this.cvs.onpointermove = onMove;
+		this.cvs.onpointerup = onUp;
+		this.cvs.onpointercancel = onUp;
 	
 	}
 
 	destroy() {
 
-		this.stop();
+		if(this.frm)
+			cancelAnimationFrame(this.frm);
+
+		send(
+			"destroy",
+			{
+				uid: this.uid
+			}
+		);
+
 		this.elt.remove();
 	
 	}
 
-	up() {
+	layout() {
 
-		const d = this.dpr;
-		
-		const w = this.elt.clientWidth;
-		const h = this.elt.clientHeight;
-		
-		const fw = Math.floor(w * d);
-		const fh = Math.floor(h * d);
-
-		this.cvs.width = fw;
-		this.cvs.height = fh;
+		const d = this.dpr, w = this.elt.clientWidth, h = this.elt.clientHeight;
+		const fw = Math.floor(w * d), fh = Math.floor(h * d);
 
 		this.lay = {
-			x: Math.floor(40 * d),
-			y: Math.floor(30 * d),
-			w: Math.floor(fw - 96 * d),
-			h: Math.floor(fh - 50 * d),
-			fw: fw,
-			fh: fh
+			x: Math.floor(24 * d),
+			y: Math.floor(36 * d),
+			w: Math.floor(fw - 56 * d),
+			h: Math.floor(fh - 54 * d),
+			fw,
+			fh
 		};
+		this.render();
+	
+	}
 
-		if(this.buf)
-			this.render();
-		else
-			this.ui();
+	parseMetadata(f, ab) {
+
+		const v = new DataView(ab);
+		const meta = {
+			spr: 44100,
+			chn: 2,
+			btd: 0,
+			pcm: false,
+			cdc: "?"
+		};
+		
+		if(ab.byteLength < 12)
+			return meta;
+
+		const ext = f.name.slice(f.name.lastIndexOf(".") + 1);
+		let typ = f.type || ext || "";
+
+		// Fallback: Detect type by signature if MIME is generic or missing
+		/*
+		const id32 = v.getUint32(0);
+		if(!typ || typ === "application/octet-stream") {
+
+			const sigs = {
+				0x4D414320: "audio/ape",
+				0x52494646: "audio/wav",
+				0x464F524D: "audio/aiff",
+				0x664C6143: "audio/flac",
+				0x4F676753: "audio/ogg"
+			};
+
+			typ = sigs[id32] || typ;
+
+			if((id32 >>> 8) === 0x494433 || (v.getUint16(0) & 0xFFE0) === 0xFFE0)
+				typ = "audio/mp3";
+			else if([0x66747970, 0x4D344120, 0x6D6F6F76].includes(v.getUint32(4)))
+				typ = "audio/mp4";
+		
+		}*/
+
+		try {
+
+			const map = {
+				"wav": Parsers.wav,
+				"aiff": Parsers.aiff,
+				"flac": Parsers.flac,
+				"ogg": Parsers.ogg,
+				"mp4": Parsers.mp4,
+				"m4a": Parsers.mp4,
+				"aac": Parsers.mp4,
+				"adts": Parsers.mp4,
+				"mp3": Parsers.mp3,
+				"mpeg": Parsers.mp3,
+				"ape": Parsers.ape
+			};
+			
+			const key = Object.keys(map)
+			.find(k =>
+				typ.includes(k));
+
+			if(key)
+				Object.assign(
+					meta,
+					map[key](v)
+				);
+		
+		}
+		catch(err) {
+
+			console.error(
+				"meta fail",
+				err
+			);
+		
+		}
+
+		return meta;
 	
 	}
 
 	async load(f) {
 
-		this.dat = {
-			nnm: f.name,
-			inf: "Loading..."
-		};
-		this.ui();
-
 		try {
 
-			const raw = await f.arrayBuffer(), v = new DataView(raw);
-			let sr = 44100, bd = null, p = 12;
+			const ab = await f.arrayBuffer();
+			const meta = this.parseMetadata(
+				f,
+				ab
+			);
+			const mib = f.size / 1048576;
+			
+			let dec;
 
-			if(v.getUint32(0) === 0x52494646) {
+			try {
 
-				while(p < v.byteLength) {
+				const ctx = new OfflineAudioContext(
+					1,
+					1,
+					meta.spr
+				);
 
-					if(v.getUint32(p) === 0x666d7420) {
-
-						sr = v.getUint32(
-							p + 12,
-							true
-						);
-						bd = v.getUint16(
-							p + 22,
-							true
-						);
-						break;
-					
-					}
-
-					p += 8 + v.getUint32(
-						p + 4,
-						true
-					);
-				
-				}
+				dec = await ctx.decodeAudioData(ab);
 			
 			}
-			else if(v.getUint32(0) === 0x664c6143) {
+			catch(err) {
 
-				sr = (v.getUint8(18) << 12) | (v.getUint8(19) << 4) | (v.getUint8(20) >> 4);
-				bd = ((v.getUint8(20) & 1) << 4 | v.getUint8(21) >> 4) + 1;
+				throw new Error(`${meta.cdc} unsupported`);
 			
 			}
+            
+			this.buf = true;
+			let kbps = (meta.pcm && meta.btd && meta.spr)
+				? Math.round(meta.spr * meta.chn * meta.btd / 1000)
+				: Math.round(f.size * 8 / dec.duration / 1000);
 
-			const dec = await new OfflineAudioContext(
-				1,
-				1,
-				sr
-			)
-			.decodeAudioData(raw);
-			
-			// Dynamic FFT Size
-			if(dec.sampleRate > 88200)
-				this.siz = 8192;
-			else if(dec.sampleRate > 44100)
-				this.siz = 4096;
-			else
-				this.siz = 2048;
+			this.dat.inf = `${meta.cdc} ${Math.round(dec.sampleRate / 1e3)}kHz${meta.btd ? " " + meta.btd + "bit" : ""} ${dec.numberOfChannels}ch ${this.fmt(dec.duration)} ${kbps}kbps ${mib >= 1 ? mib.toFixed(2) + "MB" : (f.size / 1024).toFixed(1) + "KB"}`;
+            
+			const chn = dec.getChannelData(0);
 
-			this.win = new Float32Array(this.siz);
-
-			// Periodic Hann Window
-			for(let i = 0; i < this.siz; i++)
-				this.win[i] = .5 * (1 - Math.cos(2 * Math.PI * i / this.siz));
-
-			const dur = dec.duration, sz = f.size, mib = sz / 1048576;
-
-			this.dat.inf = `${Math.round(dec.sampleRate / 1e3)}kHz${bd ? `  ${bd}bit` : ""}  ${dec.numberOfChannels}ch  ${this.fmt(dur)}  ${sz * 8 / dur / 1e3 | 0}kbps  ${mib >= 1 ? mib.toFixed(2) + "MB" : (sz / 1024).toFixed(1) + "KB"}`;
-			this.buf = dec;
-			this.render();
+			send(
+				"audio",
+				{
+					uid: this.uid,
+					chn: chn,
+					spr: dec.sampleRate
+				},
+				chn.buffer
+			);
 		
 		}
 		catch(err) {
 
-			this.dat.inf = "Error : " + err.message;
-			this.ui();
+			this.dat.inf = "Error: " + err.message;
 		
 		}
+		this.render();
 	
 	}
 
-	ui() {
+	render(drg = false) {
 
-		const {
-			ctx, lay: {
-				fw, fh, x, y, w, h
-			}, dpr, buf, dat, min, max
-		} = this;
-
-		if(!fw)
+		if(this.frm)
 			return;
 
-		const fnt = "system-ui";
-		const col = "#757575";
+		this.frm = requestAnimationFrame(() => {
 
-		ctx.fillStyle = "#000";
-		ctx.fillRect(
-			0,
-			0,
-			fw,
-			fh
-		);
+			send(
+				"render",
+				{
+					uid: this.uid,
+					lay: this.lay,
+					zoom: this.zoom,
+					pan: this.pan,
+					dpr: this.dpr,
+					dat: this.dat,
+					drg: drg,
+					log: this.main.low
+				}
+			);
 
-		ctx.fillStyle = col;
+			this.frm = null;
+		
+		});
+	
+	}
 
-		ctx.font = `${13 * dpr}px ${fnt}`;
-		ctx.textAlign = "left";
-		ctx.textBaseline = "middle";
-		ctx.fillText(
-			dat.nnm,
-			x,
-			y / 2
-		);
+	resetZoom() {
 
-		const tx = x + ctx.measureText(dat.nnm).width + 10 * dpr;
+		if(this.buf) {
 
-		ctx.font = `${11 * dpr}px ${fnt}`;
-		ctx.fillText(
-			dat.inf,
-			tx,
-			y / 2
-		);
+			this.zoom = 1;
+			this.pan = 0;
+			this.render();
+		
+		}
+	
+	}
+    
+	setZoom(fact) {
 
-		if(!buf)
+		if(!this.buf)
 			return;
 
-		const fs = 10 * dpr;
-
-		ctx.font = `${fs}px ${fnt}`;
-		ctx.textAlign = "right";
-
-		const nyq = buf.sampleRate / 2;
-		const fStep = [1e3, 2e3, 5e3, 1e4, 2e4].find(s =>
-			nyq / s <= 20) || 2e4;
-
-		for(let f = 0; f <= nyq; f += fStep) {
-
-			const py = y + h - f / nyq * h;
-
-			if(py > y + fs && py < y + h - fs) {
-
-				this.freq(
-					x,
-					py,
-					f
-				);
-			
-			}
-		
-		}
-		this.freq(
-			x,
-			y - 1,
-			nyq
-		);
-		
-		this.freq(
-			x,
-			y + h,
-			0
-		);
-
-		ctx.textAlign = "center";
-		ctx.textBaseline = "top";
-		const dur = buf.duration;
-		const tStep = [1, 2, 5, 10, 30, 60, 120, 300, 600].find(s =>
-			dur / s <= 20) || 600;
-
-		for(let t = 0; t <= dur; t += tStep) {
-
-			this.time(
-				x + t / dur * w,
-				y + h,
-				t
-			);
-		
-		}
-
-		/*
-		// last time
-		this.time(
-			x + w + 1,
-			y + h,
-			dur
-		);
-		*/
-
-		const spc = 3 * dpr, dx = x + w + spc, dy = y - 1, sw = 12 * dpr, sh = h + 1;
-
-		ctx.textAlign = "left";
-		ctx.textBaseline = "middle";
-		const grad = ctx.createImageData(
-				sw,
-				sh
-			), g32 = new Uint32Array(grad.data.buffer);
-
-		for(let py = 0; py < sh; py++) {
-
-			const c = PAL[(1 - py / h) * 255 | 0];
-
-			for(let i = 0; i < sw; i++)
-				g32[py * sw + i] = c;
-		
-		}
-		ctx.putImageData(
-			grad,
-			dx,
-			dy
-		);
-
-		for(let db = min; db <= max; db += 10) {
-
-			const py = y + h - (db - min) / (max - min) * sh;
-			
-			ctx.fillText(
-				db + "dB",
-				dx + sw + 6,
-				py
-			);
-			ctx.fillRect(
-				dx - spc,
-				py,
-				6,
-				1
-			);
-		
-		}
-
-		ctx.strokeStyle = col;
-		ctx.lineWidth = 1;
-		ctx.strokeRect(
-			x,
-			y,
-			w,
-			h
-		);
-	
-	}
-
-	freq(x, y, v) {
-		
-		this.ctx.fillText(
-			Math.round(v / 1e3) + "kHz",
-			x - this.tck - 4,
-			y
-		);
-		this.ctx.fillRect(
-			x - this.tck,
-			y,
-			this.tck,
-			1
-		);
-	
-	}
-
-	time(x, y, v) {
-
-		this.ctx.fillText(
-			this.fmt(v),
-			x,
-			y + this.tck + 4
-		);
-		this.ctx.fillRect(
-			x - 1,
-			y,
+		const nz = Math.max(
 			1,
-			this.tck
+			Math.min(
+				64,
+				this.zoom * fact
+			)
 		);
 
-	}
+		if(nz === this.zoom)
+			return;
 
-	stop() {
+		const center = this.pan + (1 / this.zoom) / 2;
 
-		if(this.raf) {
-
-			cancelAnimationFrame(this.raf);
-			this.raf = null;
-		
-		}
+		this.zoom = nz;
+		this.pan = Math.max(
+			0,
+			Math.min(
+				1 - 1 / nz,
+				center - (1 / nz) / 2
+			)
+		);
+		this.render();
 	
 	}
-
-	render() {
-
-		this.stop();
-		const {
-			ctx, lay: {
-				x, y, w, h
-			}, buf, siz, win, min, max
-		} = this;
-
-		const ch = buf.getChannelData(0), len = ch.length, fft = FFT.ctx(siz);
-		const bins = siz >> 1, step = len / w | 0;
-		
-		const norm = 20 * Math.log10(1 / siz);
-		
-		const real = new Float32Array(siz), imag = new Float32Array(siz);
-		const img = ctx.createImageData(
-				w,
-				h
-			), pix = new Uint32Array(img.data.buffer);
-		const range = max - min;
-
-		this.ui();
-		let px = 0;
-
-		const loop = () => {
-
-			const start = px;
-
-			for(let end = Math.min(
-				px + 50,
-				w
-			); px < end; px++) {
-
-				const off = (px * step) - bins;
-
-				let dc = 0;
-				let count = 0;
-
-				for(let i = 0; i < siz; i++) {
-
-					if(off + i >= 0 && off + i < len) {
-
-						dc += ch[off + i];
-						count++;
-					
-					}
-				
-				}
-
-				if(count > 0)
-					dc /= count;
-
-				for(let i = 0; i < siz; i++) {
-
-					const val = (off + i >= 0 && off + i < len) ? (ch[off + i] - dc) : 0;
-
-					real[i] = val * win[i];
-					imag[i] = 0;
-				
-				}
-				
-				FFT.calc(
-					fft,
-					real,
-					imag
-				);
-
-				for(let row = 0; row < h; row++) {
-
-					const b0 = (h - row - 1) / h * bins | 0, b1 = (h - row) / h * bins | 0;
-					let peak = 0;
-
-					for(let b = b0; b <= b1 && b < bins; b++) {
-
-						const m = real[b] * real[b] + imag[b] * imag[b];
-
-						if(m > peak)
-							peak = m;
-					
-					}
-
-					const db = 10 * Math.log10(peak + 1e-20) + norm;
-
-					pix[row * w + px] = PAL[Math.max(
-						0,
-						Math.min(
-							255,
-							(db - min) / range * 255 | 0
-						)
-					)];
-
-				}
-
-			}
-			ctx.putImageData(
-				img,
-				x,
-				y,
-				start,
-				0,
-				px - start,
-				h
-			);
-
-			if(px < w)
-				this.raf = requestAnimationFrame(loop);
-
-		};
-
-		this.raf = requestAnimationFrame(loop);
-
-	}
-
+    
 	fmt(s) {
 
-		return `${s / 60 | 0}:${(s % 60 | 0).toString()
-		.padStart(
-			2,
-			"0"
-		)}`;
-
+		return [Math.floor(s / 60), Math.floor(s % 60)].map(v =>
+			(v + "").padStart(
+				2,
+				"0"
+			))
+		.join(":");
+	
 	}
 
 }
@@ -588,192 +675,265 @@ class JSpekManager {
 
 	constructor() {
 
-		this.instances = [];
-		this.app = document.getElementById("app");
+		this.speks = new Set();
+		this.wrp = byId("wrp");
+		this.tls = byId("tools");
+		this.fin = byId("files");
+		this.cur = new Set();
 		this.tid = null;
+		this.snc = false;
+		this.low = false;
 		this.cols = 0;
 		this.rows = 0;
 
-		const fin = document.getElementById("f");
+		WRK = new Worker(`js/jspek.worker${DEBUG ? "" : ".release.min"}.js`);
+		WRK.onmessage = evt => {
 
-		const add = fs =>
-			[...fs].forEach(f =>
-				this.add(f));
-
-		fin.onchange = () => {
-
-			add(fin.files);
-			fin.value = "";
-
+			if(evt.data.type === "export")
+				this.dl(evt.data.data);
+		
 		};
-		document.body.ondragover = evt =>
-			evt.preventDefault();
 
-		document.body.ondrop = evt => {
+		this.fin.onchange = () =>
+			this.add(this.fin.files);
+		document.body.ondragover = e =>
+			e.preventDefault();
+		document.body.ondrop = e => {
 
-			evt.preventDefault();
-
-			add(evt.dataTransfer.files);
-
+			e.preventDefault();
+			this.add(e.dataTransfer.files);
+		
 		};
-		document.getElementById("browse").onclick = () =>
-			fin.click();
-		document.getElementById("save").onclick = () =>
-			this.save();
 		window.onresize = () => {
 
 			clearTimeout(this.tid);
-
 			this.tid = setTimeout(
 				() =>
 					this.draw(true),
 				123
 			);
-
+		
 		};
+
+		Object.entries({
+			"browse": () =>
+				this.fin.click(),
+			"export": () =>
+				send("export"),
+			"clear": () => {
+
+				this.speks.forEach(s =>
+					s.destroy());
+					
+				this.speks.clear();
+
+			},
+			"select": () =>
+				this.slct(),
+			"sync": () =>
+				this.sync(),
+			"low": () =>
+				this.lows(),
+			"zoomin": () =>
+				this.cur.forEach(s =>
+					s.setZoom(2)),
+			"zoomout": () =>
+				this.cur.forEach(s =>
+					s.setZoom(.5)),
+			"reset": () =>
+				this.cur.forEach(s =>
+					s.resetZoom()),
+			"remove": () =>
+				this.cur.forEach(s =>
+					this.rem(s))
+		})
+		.forEach(([k, fn]) =>
+			byId(k).onclick = fn);
 	
 	}
 
-	add(f) {
+	add(files) {
 
-		const inst = new JSpek(
-			f,
-			this.app
-		);
+		[...files].forEach(f => {
 
-		this.instances.push(inst);
-		this.draw(inst);
+			const inst = new JSpek(
+				f,
+				this
+			);
 
-		inst.elt.addEventListener(
-			"dblclick",
-			() =>
-				this.rem(inst),
-			{
-				once: true
-			}
-		);
+			this.speks.add(inst);
+			inst.elt.onclick = () => {
+
+				if(inst.did) {
+
+					inst.did = false;
+
+					return;
+
+				}
+
+				this.tgl(inst);
+			
+			};
+		
+		});
+		this.draw(true);
+
+		if(this.speks.size === 1)
+			this.all();
 	
 	}
 
 	rem(inst) {
 
-		const i = this.instances.indexOf(inst);
+		this.cur.delete(inst);
+		inst.destroy();
+		this.speks.delete(inst);
+		this.draw();
 
-		if(i > -1) {
+		if(this.speks.size === 1)
+			this.all();
+	
+	}
 
-			this.instances[i].destroy();
-			this.instances.splice(
-				i,
-				1
-			);
-			this.draw();
+	tgl(inst) {
 
+		if(this.cur.has(inst))
+			this.blr(inst);
+		else
+			this.sel(inst);
+	
+	}
+
+	slct() {
+
+		if(this.cur.size > this.speks.size / 2)
+			this.non();
+		else
+			this.all();
+	
+	}
+
+	all() {
+
+		this.speks.forEach(s => {
+
+			if(s.buf)
+				this.sel(s);
+
+		});
+	
+	}
+
+	non() {
+
+		this.speks.forEach(s =>
+			this.blr(s));
+	
+	}
+
+	sel(inst) {
+
+		if(!this.cur.size)
+			this.tls.classList.remove("nope");
+
+		this.cur.add(inst);
+		inst.elt.classList.add("fcs");
+	
+	}
+
+	blr(inst) {
+
+		inst.elt.classList.remove("fcs");
+		this.cur.delete(inst);
+
+		if(!this.cur.size)
+			this.tls.classList.add("nope");
+	
+	}
+
+	sync() {
+
+		this.snc = !this.snc;
+		byId("sync").classList.toggle(
+			"actv",
+			this.snc
+		);
+	
+	}
+
+	lows() {
+
+		this.low = !this.low;
+		byId("low").classList.toggle(
+			"actv",
+			this.low
+		);
+		this.speks.forEach(s =>
+			s.render());
+	
+	}
+
+	pan(inst, drg) {
+
+		if(this.snc) {
+
+			this.cur.forEach(s => {
+
+				if(s.uid !== inst.uid) {
+
+					s.pan = inst.pan;
+					s.render(drg);
+				
+				}
+			
+			});
+		
 		}
 	
 	}
 
-	/**
-	 * @param {!(boolean|JSpek)=} target
-	 */
 	draw(target = false) {
 
-		const n = this.instances.length;
+		const n = this.speks.size;
 
 		if(!n)
 			return;
 
-		const cols = Math.ceil(Math.sqrt(n));
-		const rows = Math.ceil(n / cols);
+		const cols = Math.ceil(Math.sqrt(n)), rows = Math.ceil(n / cols);
 
-		this.app.style.gridTemplateColumns = `repeat(${cols}, 1fr)`;
-		this.app.style.gridTemplateRows = `repeat(${rows}, 1fr)`;
+		this.wrp.style.gridTemplateColumns = `repeat(${cols}, 1fr)`;
+		this.wrp.style.gridTemplateRows = `repeat(${rows}, 1fr)`;
 
-		const chg = cols !== this.cols || rows !== this.rows;
+		if(target === true || (cols !== this.cols || rows !== this.rows))
+			this.speks.forEach(s =>
+				s.layout());
+		else if(target)
+			target.layout();
 
 		this.cols = cols;
 		this.rows = rows;
-
-		if(chg || target === true)
-			this.upAll();
-		else if(target instanceof JSpek)
-			target.up();
 	
 	}
 
-	upAll() {
+	dl(ab) {
 
-		for(const s of this.instances)
-			s.up();
-
-	}
-
-	save() {
-
-		const cvss = this.instances.filter(inst =>
-			!!inst.buf)
-		.map(inst =>
-			inst.cvs);
-
-		if(!cvss.length)
-			return;
-
-		const maxSize = 4096;
-	
-		const {
-			width, height
-		} = cvss[0];
-		const cols = Math.ceil(Math.sqrt(cvss.length));
-		const rows = Math.ceil(cvss.length / cols);
-		const scale = Math.min(
-			1,
-			maxSize / (cols * width),
-			maxSize / (rows * height)
-		);
-	
-		const sw = width * scale;
-		const sh = height * scale;
-	
-		const off = new OffscreenCanvas(
-			cols * sw,
-			rows * sh
-		);
-		
-		const ctx = /** @type {OffscreenCanvasRenderingContext2D} */(off.getContext(
-			"2d",
+		const blb = new Blob(
+			[ab],
 			{
-				alpha: false
+				type: "image/png"
 			}
-		));
-	
-		cvss.forEach((cvs, i) =>
-			ctx.drawImage(
-				cvs,
-				(i % cols) * sw,
-				Math.floor(i / cols) * sh,
-				sw,
-				sh
-			));
+		);
+		const u = URL.createObjectURL(blb), a = document.createElement("a");
 
-		off.convertToBlob()
-		.then(blb => {
-
-			const u = URL.createObjectURL(blb);
-
-			const a = document.createElement("a");
-
-			a.download = `jspek_${Date.now()}.png`;
-			a.href = u;
-			a.click();
-			URL.revokeObjectURL(u);
-		
-		});
+		a.download = `jspek_${Date.now()}.png`;
+		a.href = u;
+		a.click();
+		URL.revokeObjectURL(u);
 	
 	}
 
 }
 
-window.addEventListener(
-	"load",
-	() =>
-		new JSpekManager()
-);
+window.onload = () =>
+	new JSpekManager();
